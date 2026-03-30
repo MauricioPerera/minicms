@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>miniCMS</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #0f172a; color: #e2e8f0; }
+    .sidebar { width: 240px; background: #1e293b; }
+    .main { flex: 1; }
+    .nav-item { padding: 8px 16px; cursor: pointer; border-radius: 6px; margin: 2px 8px; font-size: 0.875rem; }
+    .nav-item:hover { background: #334155; }
+    .nav-item.active { background: #2563eb; color: white; }
+    .card { background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 16px; }
+    .btn { padding: 6px 14px; border-radius: 6px; font-size: 0.85rem; cursor: pointer; border: none; }
+    .btn-primary { background: #2563eb; color: white; }
+    .btn-primary:hover { background: #1d4ed8; }
+    .btn-danger { background: #dc2626; color: white; }
+    .btn-secondary { background: #475569; color: white; }
+    .btn-secondary:hover { background: #64748b; }
+    input, select, textarea { background: #0f172a; border: 1px solid #475569; color: #e2e8f0; padding: 6px 10px; border-radius: 4px; font-size: 0.85rem; width: 100%; }
+    input:focus, select:focus, textarea:focus { outline: none; border-color: #2563eb; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th { text-align: left; padding: 8px; border-bottom: 1px solid #334155; color: #94a3b8; font-weight: 500; }
+    td { padding: 8px; border-bottom: 1px solid #1e293b; }
+    tr:hover td { background: #1e293b; }
+    .badge { padding: 2px 8px; border-radius: 9999px; font-size: 0.75rem; }
+    .badge-blue { background: #1e3a5f; color: #93c5fd; }
+    .badge-green { background: #14532d; color: #86efac; }
+    .badge-red { background: #450a0a; color: #fca5a5; }
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 50; }
+    .modal { background: #1e293b; border: 1px solid #475569; border-radius: 12px; padding: 24px; width: 90%; max-width: 600px; max-height: 80vh; overflow-y: auto; }
+    .toast { position: fixed; bottom: 20px; right: 20px; padding: 10px 20px; border-radius: 8px; font-size: 0.85rem; z-index: 100; animation: fadeIn 0.3s; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; } }
+    .empty-state { text-align: center; padding: 60px 20px; color: #64748b; }
+    .search-box { position: relative; }
+    .search-box input { padding-left: 32px; }
+    .pagination { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 0.85rem; }
+  </style>
+</head>
+<body class="h-screen flex">
+  <!-- Sidebar -->
+  <div class="sidebar flex flex-col h-screen overflow-y-auto">
+    <div class="p-4 border-b border-slate-700">
+      <h1 class="text-lg font-bold">miniCMS</h1>
+      <p class="text-xs text-slate-400">100% browser, powered by WASM</p>
+    </div>
+    <div class="p-2 flex-1">
+      <div class="text-xs text-slate-500 px-3 py-2 uppercase tracking-wider">Navigation</div>
+      <div class="nav-item active" data-view="collections" onclick="navigate('collections')">Collections</div>
+      <div class="nav-item" data-view="users" onclick="navigate('users')">Users</div>
+      <div class="nav-item" data-view="search" onclick="navigate('search')">Search</div>
+      <div class="nav-item" data-view="settings" onclick="navigate('settings')">Settings</div>
+
+      <div class="text-xs text-slate-500 px-3 py-2 mt-4 uppercase tracking-wider" id="collections-nav-title">Collections</div>
+      <div id="collections-nav"></div>
+    </div>
+    <div class="p-3 border-t border-slate-700 text-xs text-slate-500" id="user-info">
+      Not logged in
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <div class="main h-screen overflow-y-auto">
+    <div class="p-6" id="content">
+      <div class="empty-state">
+        <div class="text-4xl mb-4">Loading...</div>
+        <p>Initializing WASM engine</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast container -->
+  <div id="toasts"></div>
+
+  <script type="module">
+    import MiniCMS from './minicms.js';
+
+    let cms;
+    let currentView = 'collections';
+    let currentCollection = null;
+    let currentPage = 0;
+    const PAGE_SIZE = 20;
+
+    // ─── Init ────────────────────────────────────────────────────
+    async function start() {
+      cms = new MiniCMS();
+      await cms.init();
+      window.cms = cms; // debug access
+
+      // Check if first run — create admin
+      try {
+        const users = cms.list('_users', { limit: 1 });
+        if (!users.items || users.items.length === 0) {
+          await cms.register('admin@minicms.local', 'admin', 'admin');
+          toast('Default admin created: admin@minicms.local / admin', 'green');
+        }
+      } catch (e) {
+        // _users doesn't exist yet — create admin (which creates the collection)
+        try {
+          await cms.register('admin@minicms.local', 'admin', 'admin');
+          toast('Default admin created: admin@minicms.local / admin', 'green');
+        } catch(e2) {}
+      }
+
+      // Auto-login if token exists
+      const user = await cms.currentUser();
+      updateUserInfo(user);
+
+      navigate('collections');
+    }
+
+    // ─── Navigation ──────────────────────────────────────────────
+    window.navigate = function(view, collection) {
+      currentView = view;
+      currentCollection = collection || null;
+      currentPage = 0;
+
+      // Update sidebar
+      document.querySelectorAll('.nav-item').forEach(el => {
+        el.classList.toggle('active', el.dataset.view === view || el.dataset.collection === collection);
+      });
+
+      render();
+    };
+
+    function render() {
+      const el = document.getElementById('content');
+      switch (currentView) {
+        case 'collections': el.innerHTML = renderCollections(); break;
+        case 'records': el.innerHTML = renderRecords(currentCollection); break;
+        case 'users': el.innerHTML = renderUsers(); break;
+        case 'search': el.innerHTML = renderSearch(); break;
+        case 'settings': el.innerHTML = renderSettings(); break;
+        default: el.innerHTML = '<div class="empty-state">Unknown view</div>';
+      }
+      updateCollectionsNav();
+    }
+
+    function updateCollectionsNav() {
+      const cols = cms.listCollections().filter(c => !c.name.startsWith('_'));
+      document.getElementById('collections-nav').innerHTML = cols.map(c =>
+        `<div class="nav-item ${currentCollection === c.name ? 'active' : ''}" data-collection="${c.name}" onclick="navigate('records', '${c.name}')">${c.name} <span class="text-slate-500 text-xs">${c.count}</span></div>`
+      ).join('');
+    }
+
+    function updateUserInfo(user) {
+      document.getElementById('user-info').innerHTML = user
+        ? `<span class="badge badge-green">${user.role}</span> ${user.email} <a href="#" onclick="doLogout()" class="text-blue-400 ml-1">logout</a>`
+        : `Not logged in <a href="#" onclick="showLoginModal()" class="text-blue-400 ml-1">login</a>`;
+    }
+
+    // ─── Collections View ────────────────────────────────────────
+    function renderCollections() {
+      const cols = cms.listCollections().filter(c => !c.name.startsWith('_'));
+      return `
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="text-xl font-semibold">Collections</h2>
+          <button class="btn btn-primary" onclick="showCreateCollectionModal()">+ New Collection</button>
+        </div>
+        ${cols.length === 0 ? '<div class="empty-state"><div class="text-2xl mb-2">No collections yet</div><p>Create your first collection to get started</p></div>' : `
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          ${cols.map(c => `
+            <div class="card cursor-pointer hover:border-blue-500 transition" onclick="navigate('records', '${c.name}')">
+              <div class="flex justify-between items-start">
+                <div>
+                  <h3 class="font-semibold">${c.name}</h3>
+                  <p class="text-sm text-slate-400">${c.count} records</p>
+                </div>
+                <button class="btn btn-danger text-xs" onclick="event.stopPropagation(); deleteCol('${c.name}')">Delete</button>
+              </div>
+              <div class="mt-2 flex flex-wrap gap-1">
+                ${(c.schema?.fields || []).map(f => `<span class="badge badge-blue">${f.name}: ${f.type}</span>`).join('')}
+              </div>
+            </div>
+          `).join('')}
+        </div>`}
+      `;
+    }
+
+    window.showCreateCollectionModal = function() {
+      showModal('New Collection', `
+        <label class="text-sm text-slate-400">Name</label>
+        <input id="col-name" placeholder="e.g. posts, products, articles">
+        <div class="mt-3">
+          <label class="text-sm text-slate-400">Fields</label>
+          <div id="fields-list"></div>
+          <button class="btn btn-secondary mt-2" onclick="addField()">+ Add Field</button>
+        </div>
+      `, () => {
+        const name = document.getElementById('col-name').value.trim();
+        if (!name) return toast('Name required', 'red');
+        const fields = getFieldsFromForm();
+        cms.createCollection(name, { fields });
+        cms.save();
+        closeModal();
+        toast(`Collection "${name}" created`, 'green');
+        navigate('records', name);
+      });
+      addField(); addField(); // Start with 2 fields
+    };
+
+    window.addField = function() {
+      const div = document.createElement('div');
+      div.className = 'flex gap-2 mt-2 items-center';
+      div.innerHTML = `
+        <input placeholder="field name" class="flex-1" data-field-name>
+        <select class="w-32" data-field-type>
+          <option value="text">text</option>
+          <option value="number">number</option>
+          <option value="bool">bool</option>
+          <option value="date">date</option>
+          <option value="select">select</option>
+          <option value="email">email</option>
+          <option value="url">url</option>
+          <option value="json">json</option>
+          <option value="file">file</option>
+        </select>
+        <label class="text-xs whitespace-nowrap"><input type="checkbox" data-field-req> req</label>
+        <button class="text-red-400 text-sm" onclick="this.parentElement.remove()">x</button>
+      `;
+      document.getElementById('fields-list').appendChild(div);
+    };
+
+    function getFieldsFromForm() {
+      const fields = [];
+      document.querySelectorAll('#fields-list > div').forEach(div => {
+        const name = div.querySelector('[data-field-name]').value.trim();
+        const type = div.querySelector('[data-field-type]').value;
+        const required = div.querySelector('[data-field-req]').checked;
+        if (name) fields.push({ name, type, required });
+      });
+      return fields;
+    }
+
+    window.deleteCol = function(name) {
+      if (!confirm(`Delete collection "${name}" and all its records?`)) return;
+      cms.deleteCollection(name);
+      cms.save();
+      toast(`Deleted "${name}"`, 'red');
+      navigate('collections');
+    };
+
+    // ─── Records View ────────────────────────────────────────────
+    function renderRecords(collection) {
+      if (!collection) return '<div class="empty-state">Select a collection</div>';
+      const schema = cms.getSchema(collection);
+      const fields = schema?.fields || [];
+      const page = cms.list(collection, {
+        orderBy: '_created', desc: true,
+        limit: PAGE_SIZE, offset: currentPage * PAGE_SIZE,
+      });
+      const items = page.items || [];
+      const total = page.total || 0;
+
+      return `
+        <div class="flex justify-between items-center mb-4">
+          <div>
+            <h2 class="text-xl font-semibold">${collection}</h2>
+            <p class="text-sm text-slate-400">${total} records</p>
+          </div>
+          <button class="btn btn-primary" onclick="showCreateRecordModal('${collection}')">+ New Record</button>
+        </div>
+        <div class="card overflow-x-auto">
+          <table>
+            <thead><tr>
+              <th>ID</th>
+              ${fields.map(f => `<th>${f.name}</th>`).join('')}
+              <th>Created</th>
+              <th></th>
+            </tr></thead>
+            <tbody>
+              ${items.length === 0 ? `<tr><td colspan="${fields.length + 3}" class="text-center text-slate-500 py-8">No records</td></tr>` : ''}
+              ${items.map(r => {
+                const m = r.metadata || r;
+                const rid = m._id || r._id || r.id || '';
+                return `<tr>
+                  <td class="text-xs text-slate-400 font-mono">${rid.slice(0, 12)}</td>
+                  ${fields.map(f => `<td>${formatCell(m[f.name], f.type)}</td>`).join('')}
+                  <td class="text-xs text-slate-400">${m._created ? new Date(m._created).toLocaleDateString() : ''}</td>
+                  <td>
+                    <button class="text-blue-400 text-xs mr-2" onclick='showEditRecordModal("${collection}", "${rid}")'>edit</button>
+                    <button class="text-red-400 text-xs" onclick='deleteRecord("${collection}", "${rid}")'>del</button>
+                  </td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+          <div class="pagination">
+            <button class="btn btn-secondary" ${currentPage === 0 ? 'disabled' : ''} onclick="prevPage('${collection}')">Prev</button>
+            <span class="text-slate-400">Page ${currentPage + 1} of ${Math.max(1, Math.ceil(total / PAGE_SIZE))}</span>
+            <button class="btn btn-secondary" ${!page.has_more ? 'disabled' : ''} onclick="nextPage('${collection}')">Next</button>
+          </div>
+        </div>
+      `;
+    }
+
+    function formatCell(val, type) {
+      if (val === undefined || val === null) return '<span class="text-slate-600">—</span>';
+      if (type === 'bool') return val ? '<span class="badge badge-green">true</span>' : '<span class="badge badge-red">false</span>';
+      if (type === 'file') return val ? '<span class="badge badge-blue">file</span>' : '—';
+      const s = String(val);
+      return s.length > 50 ? s.slice(0, 50) + '...' : s;
+    }
+
+    window.showCreateRecordModal = function(collection) {
+      const schema = cms.getSchema(collection);
+      const fields = schema?.fields || [];
+      showModal(`New ${collection} record`, `
+        ${fields.map(f => `
+          <label class="text-sm text-slate-400 mt-2 block">${f.name} ${f.required ? '<span class="text-red-400">*</span>' : ''}</label>
+          ${fieldInput(f, '')}
+        `).join('')}
+      `, () => {
+        const data = readFormData(fields);
+        try {
+          cms.create(collection, data);
+          cms.save();
+          closeModal();
+          toast('Record created', 'green');
+          navigate('records', collection);
+        } catch (e) { toast(e.message, 'red'); }
+      });
+    };
+
+    window.showEditRecordModal = function(collection, id) {
+      const record = cms.getById(collection, id);
+      if (!record) return toast('Record not found', 'red');
+      const schema = cms.getSchema(collection);
+      const fields = schema?.fields || [];
+      const m = record.metadata || record;
+      showModal(`Edit ${collection}`, `
+        ${fields.map(f => `
+          <label class="text-sm text-slate-400 mt-2 block">${f.name}</label>
+          ${fieldInput(f, m[f.name] ?? '')}
+        `).join('')}
+      `, () => {
+        const data = readFormData(fields);
+        try {
+          cms.update(collection, id, data);
+          cms.save();
+          closeModal();
+          toast('Record updated', 'green');
+          navigate('records', collection);
+        } catch (e) { toast(e.message, 'red'); }
+      });
+    };
+
+    function fieldInput(field, value) {
+      const v = value ?? '';
+      switch (field.type) {
+        case 'bool': return `<select data-field="${field.name}"><option value="false" ${!v ? 'selected' : ''}>false</option><option value="true" ${v ? 'selected' : ''}>true</option></select>`;
+        case 'number': return `<input type="number" data-field="${field.name}" value="${v}">`;
+        case 'select': return `<select data-field="${field.name}">${(field.options || []).map(o => `<option ${o === v ? 'selected' : ''}>${o}</option>`).join('')}</select>`;
+        case 'date': return `<input type="date" data-field="${field.name}" value="${v}">`;
+        case 'email': return `<input type="email" data-field="${field.name}" value="${v}">`;
+        case 'url': return `<input type="url" data-field="${field.name}" value="${v}">`;
+        case 'json': return `<textarea data-field="${field.name}" rows="3">${typeof v === 'object' ? JSON.stringify(v) : v}</textarea>`;
+        case 'file': return `<input type="file" data-field="${field.name}">`;
+        default: return `<input type="text" data-field="${field.name}" value="${v}">`;
+      }
+    }
+
+    function readFormData(fields) {
+      const data = {};
+      for (const f of fields) {
+        const el = document.querySelector(`[data-field="${f.name}"]`);
+        if (!el) continue;
+        let val = el.value;
+        if (f.type === 'number') val = val ? Number(val) : null;
+        if (f.type === 'bool') val = val === 'true';
+        if (f.type === 'json') try { val = JSON.parse(val); } catch { }
+        if (f.type === 'file' && el.files?.[0]) {
+          // Read as base64
+          val = '__pending_file__'; // placeholder
+          const reader = new FileReader();
+          reader.onload = () => {
+            data[f.name] = reader.result;
+          };
+          reader.readAsDataURL(el.files[0]);
+        }
+        data[f.name] = val;
+      }
+      return data;
+    }
+
+    window.deleteRecord = function(collection, id) {
+      if (!confirm('Delete this record?')) return;
+      cms.delete(collection, id);
+      cms.save();
+      toast('Deleted', 'red');
+      navigate('records', collection);
+    };
+
+    window.prevPage = function(col) { if (currentPage > 0) { currentPage--; navigate('records', col); } };
+    window.nextPage = function(col) { currentPage++; navigate('records', col); };
+
+    // ─── Users View ──────────────────────────────────────────────
+    function renderUsers() {
+      const page = cms.list('_users', { limit: 100, offset: 0 });
+      const users = (page.items || []).map(u => u.metadata || u);
+      return `
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="text-xl font-semibold">Users</h2>
+          <button class="btn btn-primary" onclick="showRegisterModal()">+ Register User</button>
+        </div>
+        <div class="card">
+          <table>
+            <thead><tr><th>Email</th><th>Role</th><th>Created</th></tr></thead>
+            <tbody>
+              ${users.map(u => `<tr>
+                <td>${u.email || ''}</td>
+                <td><span class="badge ${u.role === 'admin' ? 'badge-green' : 'badge-blue'}">${u.role || 'viewer'}</span></td>
+                <td class="text-xs text-slate-400">${u._created ? new Date(u._created).toLocaleDateString() : ''}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    window.showRegisterModal = function() {
+      showModal('Register User', `
+        <label class="text-sm text-slate-400">Email</label>
+        <input id="reg-email" type="email" placeholder="user@example.com">
+        <label class="text-sm text-slate-400 mt-2 block">Password</label>
+        <input id="reg-pass" type="password">
+        <label class="text-sm text-slate-400 mt-2 block">Role</label>
+        <select id="reg-role"><option>viewer</option><option>editor</option><option>admin</option></select>
+      `, async () => {
+        try {
+          await cms.register(
+            document.getElementById('reg-email').value,
+            document.getElementById('reg-pass').value,
+            document.getElementById('reg-role').value,
+          );
+          cms.save();
+          closeModal();
+          toast('User registered', 'green');
+          navigate('users');
+        } catch (e) { toast(e.message, 'red'); }
+      });
+    };
+
+    window.showLoginModal = function() {
+      showModal('Login', `
+        <label class="text-sm text-slate-400">Email</label>
+        <input id="login-email" type="email" value="admin@minicms.local">
+        <label class="text-sm text-slate-400 mt-2 block">Password</label>
+        <input id="login-pass" type="password" value="admin">
+      `, async () => {
+        try {
+          const result = await cms.login(
+            document.getElementById('login-email').value,
+            document.getElementById('login-pass').value,
+          );
+          closeModal();
+          toast(`Logged in as ${result.user.email}`, 'green');
+          updateUserInfo(result.user);
+        } catch (e) { toast(e.message, 'red'); }
+      });
+    };
+
+    window.doLogout = function() {
+      cms.logout();
+      updateUserInfo(null);
+      toast('Logged out', 'blue');
+    };
+
+    // ─── Search View ─────────────────────────────────────────────
+    function renderSearch() {
+      return `
+        <h2 class="text-xl font-semibold mb-4">Search</h2>
+        <div class="card">
+          <div class="flex gap-2">
+            <input id="search-input" placeholder="Search across all collections..." class="flex-1" onkeyup="if(event.key==='Enter') doSearch()">
+            <button class="btn btn-primary" onclick="doSearch()">Search</button>
+          </div>
+          <div id="search-results" class="mt-4"></div>
+        </div>
+      `;
+    }
+
+    window.doSearch = function() {
+      const q = document.getElementById('search-input').value;
+      if (!q) return;
+      const cols = cms.listCollections().filter(c => !c.name.startsWith('_'));
+      let allResults = [];
+      for (const col of cols) {
+        try {
+          const results = cms.search(col.name, q, 10);
+          allResults.push(...(results || []).map(r => ({ ...r, _collection: col.name })));
+        } catch (e) {}
+      }
+      document.getElementById('search-results').innerHTML = allResults.length === 0
+        ? '<p class="text-slate-500 mt-4">No results found</p>'
+        : allResults.map(r => `
+          <div class="py-2 border-b border-slate-700 cursor-pointer hover:bg-slate-800 px-2 rounded" onclick="navigate('records', '${r._collection}')">
+            <span class="badge badge-blue mr-2">${r._collection}</span>
+            <span class="text-sm">${r.id}</span>
+            ${r.metadata ? `<span class="text-slate-400 text-xs ml-2">${JSON.stringify(r.metadata).slice(0, 80)}</span>` : ''}
+          </div>
+        `).join('');
+    };
+
+    // ─── Settings View ───────────────────────────────────────────
+    function renderSettings() {
+      return `
+        <h2 class="text-xl font-semibold mb-4">Settings</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="card">
+            <h3 class="font-semibold mb-2">Export Database</h3>
+            <p class="text-sm text-slate-400 mb-3">Download all data as JSON</p>
+            <button class="btn btn-primary" onclick="doExport()">Export JSON</button>
+          </div>
+          <div class="card">
+            <h3 class="font-semibold mb-2">Import Database</h3>
+            <p class="text-sm text-slate-400 mb-3">Restore from JSON file</p>
+            <input type="file" id="import-file" accept=".json" class="mb-2">
+            <button class="btn btn-primary" onclick="doImport()">Import</button>
+          </div>
+          <div class="card">
+            <h3 class="font-semibold mb-2 text-red-400">Danger Zone</h3>
+            <p class="text-sm text-slate-400 mb-3">Clear all data permanently</p>
+            <button class="btn btn-danger" onclick="doClearAll()">Clear All Data</button>
+          </div>
+          <div class="card">
+            <h3 class="font-semibold mb-2">About</h3>
+            <p class="text-sm text-slate-400">miniCMS v0.1.0</p>
+            <p class="text-sm text-slate-400">Powered by minimemory WASM (493KB)</p>
+            <p class="text-sm text-slate-400">100% browser, zero backend</p>
+          </div>
+        </div>
+      `;
+    }
+
+    window.doExport = function() {
+      const data = cms.export();
+      const blob = new Blob([data], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `minicms-export-${Date.now()}.json`;
+      a.click(); URL.revokeObjectURL(url);
+      toast('Exported', 'green');
+    };
+
+    window.doImport = function() {
+      const file = document.getElementById('import-file').files[0];
+      if (!file) return toast('Select a file', 'red');
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          cms.import(reader.result);
+          cms.save();
+          toast('Imported successfully', 'green');
+          navigate('collections');
+        } catch (e) { toast(e.message, 'red'); }
+      };
+      reader.readAsText(file);
+    };
+
+    window.doClearAll = function() {
+      if (!confirm('This will delete ALL data. Are you sure?')) return;
+      if (!confirm('Really? This cannot be undone.')) return;
+      cms.clear();
+      cms.save();
+      toast('All data cleared', 'red');
+      navigate('collections');
+    };
+
+    // ─── Modal ───────────────────────────────────────────────────
+    function showModal(title, body, onSave) {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.id = 'modal';
+      overlay.innerHTML = `
+        <div class="modal">
+          <div class="flex justify-between items-center mb-4">
+            <h3 class="text-lg font-semibold">${title}</h3>
+            <button class="text-slate-400 hover:text-white text-xl" onclick="closeModal()">x</button>
+          </div>
+          <div id="modal-body">${body}</div>
+          <div class="flex justify-end gap-2 mt-4">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" id="modal-save">Save</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(overlay);
+      overlay.querySelector('#modal-save').onclick = onSave;
+    }
+
+    window.closeModal = function() {
+      document.getElementById('modal')?.remove();
+    };
+
+    // ─── Toast ───────────────────────────────────────────────────
+    function toast(msg, color = 'blue') {
+      const colors = { green: 'bg-green-900 text-green-200', red: 'bg-red-900 text-red-200', blue: 'bg-blue-900 text-blue-200' };
+      const div = document.createElement('div');
+      div.className = `toast ${colors[color] || colors.blue}`;
+      div.textContent = msg;
+      document.getElementById('toasts').appendChild(div);
+      setTimeout(() => div.remove(), 3000);
+    }
+
+    // ─── Start ───────────────────────────────────────────────────
+    start().catch(e => {
+      document.getElementById('content').innerHTML = `<div class="empty-state"><div class="text-2xl mb-2 text-red-400">Error</div><pre class="text-sm">${e.message}\n${e.stack}</pre></div>`;
+    });
+  </script>
+</body>
+</html>
