@@ -204,7 +204,7 @@ function idbDelete(db, store, key) {
 // ---------------------------------------------------------------------------
 
 const FIELD_TYPES = new Set([
-  'text', 'number', 'bool', 'date', 'select', 'file', 'relation', 'json', 'email', 'url'
+  'text', 'number', 'bool', 'date', 'select', 'file', 'relation', 'json', 'email', 'url', 'vector'
 ]);
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -254,6 +254,10 @@ function validateField(value, field) {
       if (typeof value !== 'string' || !URL_RE.test(value))
         throw new Error(`Field "${name}" must be a valid URL`);
       break;
+    case 'vector':
+      if (!Array.isArray(value) || !value.every(v => typeof v === 'number'))
+        throw new Error(`Field "${name}" must be an array of numbers`);
+      break;
     default:
       throw new Error(`Unknown field type "${type}"`);
   }
@@ -276,7 +280,13 @@ function validateRecord(data, schema, partial) {
 // ---------------------------------------------------------------------------
 
 class MiniCMS {
-  constructor() {
+  /**
+   * @param {object} [config]
+   * @param {number} [config.dimensions=384] Vector dimensions for embedding fields
+   * @param {object} [config.storage] Custom storage adapter (for Node.js server mode)
+   */
+  constructor(config) {
+    this._config = config || {};
     /** @type {WasmVectorDB|null} */
     this._db = null;
     /** @type {IDBDatabase|null} */
@@ -302,8 +312,10 @@ class MiniCMS {
   async init() {
     // 1. Init WASM
     await wasmInit();
-    // Use 2 dimensions, cosine, flat -- we only use document store (no vectors)
-    this._db = new WasmVectorDB(2, 'cosine', 'flat');
+    // Default 384 dims for vector fields (common embedding size)
+    // Use flat index; switch to hnsw for >10K docs
+    this._dims = this._config?.dimensions || 384;
+    this._db = new WasmVectorDB(this._dims, 'cosine', 'flat');
 
     // 2. Open IndexedDB
     this._idb = await openIDB('minicms', 1, (db) => {
@@ -455,7 +467,21 @@ class MiniCMS {
       _updated: timestamp,
       _deleted: false
     };
-    this._db.insert_document(this._docId(collection, id), null, JSON.stringify(record));
+    // Extract vector field (first vector-type field in schema)
+    const vectorField = schema.fields.find(f => f.type === 'vector');
+    let vector = null;
+    if (vectorField && record[vectorField.name]) {
+      vector = Array.from(record[vectorField.name]);
+      // Pad or truncate to DB dimensions
+      if (vector.length < this._dims) vector = vector.concat(new Array(this._dims - vector.length).fill(0));
+      if (vector.length > this._dims) vector = vector.slice(0, this._dims);
+    }
+
+    this._db.insert_document(
+      this._docId(collection, id),
+      vector,
+      JSON.stringify(record),
+    );
     this._emit(collection, 'create', record);
     this._scheduleSave();
     return record;
@@ -483,10 +509,19 @@ class MiniCMS {
       ...clean,
       _updated: now()
     };
+    // Extract vector field
+    const vectorField = schema.fields.find(f => f.type === 'vector');
+    let vector = null;
+    if (vectorField && updated[vectorField.name]) {
+      vector = Array.from(updated[vectorField.name]);
+      if (vector.length < this._dims) vector = vector.concat(new Array(this._dims - vector.length).fill(0));
+      if (vector.length > this._dims) vector = vector.slice(0, this._dims);
+    }
+
     // Delete old and re-insert (minimemory has no partial update for metadata)
     const docId = this._docId(collection, id);
     this._db.delete(docId);
-    this._db.insert_document(docId, null, JSON.stringify(updated));
+    this._db.insert_document(docId, vector, JSON.stringify(updated));
     this._emit(collection, 'update', updated);
     this._scheduleSave();
     return updated;
@@ -545,6 +580,33 @@ class MiniCMS {
       if (meta._collection === collection && !meta._deleted) {
         filtered.push(meta);
         if (filtered.length >= (limit || 20)) break;
+      }
+    }
+    return filtered;
+  }
+
+  /**
+   * Vector similarity search — find records with similar embeddings.
+   * @param {string} collection
+   * @param {number[]} queryVector — embedding to search against
+   * @param {number} [limit=10]
+   * @returns {Array<{record: object, distance: number}>}
+   */
+  vectorSearch(collection, queryVector, limit) {
+    this._assertCollection(collection);
+    const k = (limit || 10) * 3;
+    const query = new Float32Array(queryVector.length <= this._dims
+      ? [...queryVector, ...new Array(Math.max(0, this._dims - queryVector.length)).fill(0)]
+      : queryVector.slice(0, this._dims)
+    );
+    const raw = this._db.search(query, k);
+    const results = JSON.parse(raw);
+    const filtered = [];
+    for (const item of results) {
+      const meta = item.metadata ? (typeof item.metadata === 'string' ? JSON.parse(item.metadata) : item.metadata) : item;
+      if (meta._collection === collection && !meta._deleted) {
+        filtered.push({ record: meta, distance: item.distance });
+        if (filtered.length >= (limit || 10)) break;
       }
     }
     return filtered;
