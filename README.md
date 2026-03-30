@@ -133,6 +133,27 @@ Default admin: `admin@minicms.local` / `admin`
 | AI models (cached) | ~530MB |
 | **App total (no models)** | **~625KB** |
 
+## System Requirements
+
+### Browser mode (GraphRAG)
+- **Chrome 113+** or **Edge 113+** (WebGPU support)
+- **4GB+ RAM** free (models load ~2GB into memory)
+- **~530MB** disk for cached models (first load only)
+- Falls back to WASM if WebGPU unavailable (slower, works everywhere)
+
+### Server mode
+- **Node.js 18+** with ESM support
+- No GPU required (WASM inference)
+
+## Technical Details
+
+The GraphRAG engine uses [transformers.js v3](https://huggingface.co/docs/transformers.js) with:
+- `AutoTokenizer` + `AutoModelForCausalLM` for Qwen3 (not `pipeline('text-generation')`)
+- `pipeline('feature-extraction')` for e5-small embeddings
+- `dtype: 'q4f16'` quantization for WebGPU, WASM fallback
+- Chat template applied via `tokenizer.apply_chat_template()`
+- All heavy dependencies (transformers.js, PDF.js, mammoth.js) loaded dynamically from CDN
+
 ## Privacy Guarantee
 
 When using GraphRAG in the browser:
