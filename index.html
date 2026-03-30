@@ -312,8 +312,8 @@
           <label class="text-sm text-slate-400 mt-2 block">${f.name} ${f.required ? '<span class="text-red-400">*</span>' : ''}</label>
           ${fieldInput(f, '')}
         `).join('')}
-      `, () => {
-        const data = readFormData(fields);
+      `, async () => {
+        const data = await readFormData(fields);
         try {
           cms.create(collection, data);
           cms.save();
@@ -335,8 +335,8 @@
           <label class="text-sm text-slate-400 mt-2 block">${f.name}</label>
           ${fieldInput(f, m[f.name] ?? '')}
         `).join('')}
-      `, () => {
-        const data = readFormData(fields);
+      `, async () => {
+        const data = await readFormData(fields);
         try {
           cms.update(collection, id, data);
           cms.save();
@@ -362,7 +362,7 @@
       }
     }
 
-    function readFormData(fields) {
+    async function readFormData(fields) {
       const data = {};
       for (const f of fields) {
         const el = document.querySelector(`[data-field="${f.name}"]`);
@@ -372,13 +372,11 @@
         if (f.type === 'bool') val = val === 'true';
         if (f.type === 'json') try { val = JSON.parse(val); } catch { }
         if (f.type === 'file' && el.files?.[0]) {
-          // Read as base64
-          val = '__pending_file__'; // placeholder
-          const reader = new FileReader();
-          reader.onload = () => {
-            data[f.name] = reader.result;
-          };
-          reader.readAsDataURL(el.files[0]);
+          val = await new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result);
+            reader.readAsDataURL(el.files[0]);
+          });
         }
         data[f.name] = val;
       }
@@ -498,8 +496,8 @@
         : allResults.map(r => `
           <div class="py-2 border-b border-slate-700 cursor-pointer hover:bg-slate-800 px-2 rounded" onclick="navigate('records', '${r._collection}')">
             <span class="badge badge-blue mr-2">${r._collection}</span>
-            <span class="text-sm">${r.id}</span>
-            ${r.metadata ? `<span class="text-slate-400 text-xs ml-2">${JSON.stringify(r.metadata).slice(0, 80)}</span>` : ''}
+            <span class="text-sm">${r._id || r.id || ''}</span>
+            <span class="text-slate-400 text-xs ml-2">${r.title || r.content || r.name || JSON.stringify(r).slice(0, 80)}</span>
           </div>
         `).join('');
     };
@@ -536,13 +534,15 @@
     }
 
     window.doExport = function() {
-      const data = cms.export();
-      const blob = new Blob([data], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = `minicms-export-${Date.now()}.json`;
-      a.click(); URL.revokeObjectURL(url);
-      toast('Exported', 'green');
+      try {
+        const data = cms.export();
+        const blob = new Blob([data], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `minicms-export-${Date.now()}.json`;
+        a.click(); URL.revokeObjectURL(url);
+        toast('Exported', 'green');
+      } catch(e) { toast('Export failed: ' + e.message, 'red'); }
     };
 
     window.doImport = function() {

@@ -528,7 +528,8 @@ class MiniCMS {
     return {
       items,
       total: result.total || items.length,
-      hasMore: result.has_more || false
+      has_more: result.has_more || false,
+      hasMore: result.has_more || false, // alias
     };
   }
 
@@ -738,11 +739,11 @@ class MiniCMS {
     await idbPut(this._idb, 'data', 'snapshot', snapshot);
   }
 
-  async export() {
-    const snapshot = this._db.export_snapshot();
+  export() {
+    const snapshot = this._db.export_snapshot(); // JSON string
     const schemas = {};
     for (const [k, v] of this._schemas) schemas[k] = v;
-    return JSON.stringify({ snapshot: JSON.parse(snapshot), schemas });
+    return JSON.stringify({ snapshot, schemas });
   }
 
   async clear() {
@@ -764,7 +765,9 @@ class MiniCMS {
     }
     // Restore snapshot
     if (data.snapshot) {
-      this._db.import_snapshot(JSON.stringify(data.snapshot));
+      // snapshot is already a JSON string (from export_snapshot)
+      const snap = typeof data.snapshot === 'string' ? data.snapshot : JSON.stringify(data.snapshot);
+      this._db.import_snapshot(snap);
     }
     await this.save();
   }
