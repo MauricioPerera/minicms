@@ -53,6 +53,11 @@
       <div class="nav-item" data-view="search" onclick="navigate('search')">Search</div>
       <div class="nav-item" data-view="settings" onclick="navigate('settings')">Settings</div>
 
+      <div class="text-xs text-slate-500 px-3 py-2 mt-4 uppercase tracking-wider">GraphRAG</div>
+      <div class="nav-item" data-view="documents" onclick="navigate('documents')">Documents</div>
+      <div class="nav-item" data-view="chat" onclick="navigate('chat')">Chat</div>
+      <div class="nav-item" data-view="graph" onclick="navigate('graph')">Graph</div>
+
       <div class="text-xs text-slate-500 px-3 py-2 mt-4 uppercase tracking-wider" id="collections-nav-title">Collections</div>
       <div id="collections-nav"></div>
     </div>
@@ -133,6 +138,9 @@
         case 'users': el.innerHTML = renderUsers(); break;
         case 'search': el.innerHTML = renderSearch(); break;
         case 'settings': el.innerHTML = renderSettings(); break;
+        case 'documents': el.innerHTML = renderDocuments(); break;
+        case 'chat': el.innerHTML = renderChat(); break;
+        case 'graph': el.innerHTML = renderGraph(); break;
         default: el.innerHTML = '<div class="empty-state">Unknown view</div>';
       }
       updateCollectionsNav();
@@ -568,6 +576,209 @@
       toast('All data cleared', 'red');
       navigate('collections');
     };
+
+    // ─── Modal ───────────────────────────────────────────────────
+    // ─── GraphRAG Views ─────────────────────────────────────────
+
+    let rag = null; // MiniRAG instance (lazy loaded)
+
+    async function ensureRag() {
+      if (rag) return rag;
+      try {
+        const mod = await import('./minicms-rag.js');
+        rag = new mod.default(cms);
+        document.getElementById('rag-status').textContent = 'Loading models...';
+        await rag.init((p) => {
+          document.getElementById('rag-status').textContent =
+            `Loading models... ${p.percent || 0}%`;
+        });
+        document.getElementById('rag-status').textContent = 'Models ready';
+        document.getElementById('rag-status').className = 'text-xs text-green-400';
+        return rag;
+      } catch (e) {
+        document.getElementById('rag-status').textContent = 'Model load failed: ' + e.message;
+        document.getElementById('rag-status').className = 'text-xs text-red-400';
+        throw e;
+      }
+    }
+
+    function renderDocuments() {
+      const docs = rag ? rag.getDocuments() : [];
+      return `
+        <div class="flex justify-between items-center mb-4">
+          <div>
+            <h2 class="text-xl font-semibold">Documents</h2>
+            <div id="rag-status" class="text-xs text-slate-400">${rag?.status === 'ready' ? 'Models ready' : 'Models not loaded — click Upload to initialize'}</div>
+          </div>
+        </div>
+        <div class="card mb-4">
+          <div class="border-2 border-dashed border-slate-600 rounded-lg p-8 text-center" id="drop-zone">
+            <p class="text-slate-400 mb-2">Drop PDF, DOCX, or TXT files here</p>
+            <input type="file" id="doc-upload" accept=".pdf,.docx,.txt,.md" multiple class="mb-2">
+            <br><button class="btn btn-primary mt-2" onclick="uploadDocuments()">Upload & Process</button>
+            <div id="upload-progress" class="mt-2 text-sm text-slate-400"></div>
+          </div>
+        </div>
+        <div class="card">
+          <h3 class="font-semibold mb-2">Ingested Documents</h3>
+          ${docs.length === 0 ? '<p class="text-slate-500">No documents yet</p>' : `
+          <table>
+            <thead><tr><th>Document</th><th>Chunks</th><th>Entities</th><th>Date</th><th></th></tr></thead>
+            <tbody>
+              ${docs.map(d => `<tr>
+                <td>${d.name || d._id}</td>
+                <td>${d.chunks || 0}</td>
+                <td>${d.entities || 0}</td>
+                <td class="text-xs text-slate-400">${d._created ? new Date(d._created).toLocaleDateString() : ''}</td>
+                <td><button class="text-red-400 text-xs" onclick="deleteDoc('${d._id}')">del</button></td>
+              </tr>`).join('')}
+            </tbody>
+          </table>`}
+        </div>
+        <div class="mt-3 text-xs text-slate-500 flex items-center gap-2">
+          <span class="inline-block w-2 h-2 rounded-full bg-green-500"></span>
+          All processing is local — no data leaves your device
+        </div>
+      `;
+    }
+
+    window.uploadDocuments = async function() {
+      const files = document.getElementById('doc-upload').files;
+      if (!files.length) return toast('Select files first', 'red');
+      const progress = document.getElementById('upload-progress');
+      try {
+        progress.textContent = 'Initializing models...';
+        const r = await ensureRag();
+        for (let i = 0; i < files.length; i++) {
+          const f = files[i];
+          progress.textContent = `Processing ${f.name} (${i+1}/${files.length})...`;
+          const result = await r.ingest(f, (p) => {
+            progress.textContent = `${f.name}: ${p.step} (${p.current}/${p.total})`;
+          });
+          toast(`${f.name}: ${result.chunks} chunks, ${result.entities} entities`, 'green');
+        }
+        progress.textContent = 'Done!';
+        await cms.save();
+        navigate('documents');
+      } catch (e) {
+        progress.textContent = 'Error: ' + e.message;
+        toast(e.message, 'red');
+      }
+    };
+
+    window.deleteDoc = async function(docId) {
+      if (!rag || !confirm('Delete this document and its chunks?')) return;
+      rag.deleteDocument(docId);
+      await cms.save();
+      toast('Document deleted', 'red');
+      navigate('documents');
+    };
+
+    function renderChat() {
+      return `
+        <div class="flex justify-between items-center mb-4">
+          <h2 class="text-xl font-semibold">Chat with Documents</h2>
+          <div id="rag-status" class="text-xs text-slate-400">${rag?.status === 'ready' ? 'Models ready' : 'Upload a document first'}</div>
+        </div>
+        <div class="card" style="height: calc(100vh - 200px); display: flex; flex-direction: column;">
+          <div id="chat-messages" class="flex-1 overflow-y-auto mb-4 space-y-3" style="min-height:0">
+            <div class="text-slate-500 text-sm p-4 text-center">Ask a question about your documents. All answers are generated locally.</div>
+          </div>
+          <div class="flex gap-2">
+            <input id="chat-input" placeholder="Ask about your documents..." class="flex-1" onkeyup="if(event.key==='Enter') sendChat()">
+            <button class="btn btn-primary" onclick="sendChat()">Send</button>
+          </div>
+        </div>
+        <div class="mt-2 text-xs text-slate-500 flex items-center gap-2">
+          <span class="inline-block w-2 h-2 rounded-full bg-green-500"></span>
+          Privacy mode — all AI processing runs in your browser
+        </div>
+      `;
+    }
+
+    window.sendChat = async function() {
+      const input = document.getElementById('chat-input');
+      const q = input.value.trim();
+      if (!q) return;
+      input.value = '';
+
+      const messages = document.getElementById('chat-messages');
+      messages.innerHTML += `<div class="p-3 rounded-lg bg-slate-800"><span class="text-blue-400 text-xs">You</span><br>${q}</div>`;
+
+      try {
+        const r = await ensureRag();
+        messages.innerHTML += `<div class="p-3 rounded-lg bg-slate-700 text-slate-400" id="chat-thinking">Thinking...</div>`;
+        messages.scrollTop = messages.scrollHeight;
+
+        const result = await r.query(q);
+
+        document.getElementById('chat-thinking').outerHTML = `
+          <div class="p-3 rounded-lg bg-slate-700">
+            <span class="text-green-400 text-xs">Assistant</span><br>
+            <div class="mt-1">${result.answer}</div>
+            ${result.sources?.length ? `
+              <div class="mt-2 text-xs text-slate-400 border-t border-slate-600 pt-2">
+                <strong>Sources:</strong>
+                ${result.sources.map(s => `<div class="mt-1">p.${s.page || '?'}: "${(s.text || '').slice(0, 100)}..." (score: ${s.score?.toFixed(3) || '?'})</div>`).join('')}
+              </div>
+            ` : ''}
+            ${result.entities?.length ? `
+              <div class="mt-1 flex flex-wrap gap-1">
+                ${result.entities.map(e => `<span class="badge badge-blue">${e.name}: ${e.type}</span>`).join('')}
+              </div>
+            ` : ''}
+          </div>
+        `;
+        messages.scrollTop = messages.scrollHeight;
+      } catch (e) {
+        const thinking = document.getElementById('chat-thinking');
+        if (thinking) thinking.outerHTML = `<div class="p-3 rounded-lg bg-red-900 text-red-200">Error: ${e.message}</div>`;
+        else messages.innerHTML += `<div class="p-3 rounded-lg bg-red-900 text-red-200">Error: ${e.message}</div>`;
+      }
+    };
+
+    function renderGraph() {
+      if (!rag || rag.status !== 'ready') {
+        return '<div class="empty-state"><div class="text-2xl mb-2">No graph yet</div><p>Upload documents first to build the knowledge graph</p></div>';
+      }
+      const graph = rag.getGraph();
+      const entities = graph.nodes || [];
+      const relations = graph.edges || [];
+
+      return `
+        <h2 class="text-xl font-semibold mb-4">Knowledge Graph</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+          <div class="card">
+            <h3 class="font-semibold mb-2">Entities (${entities.length})</h3>
+            <div style="max-height: 400px; overflow-y: auto;">
+              ${entities.length === 0 ? '<p class="text-slate-500">No entities</p>' : entities.map(e =>
+                `<div class="flex items-center gap-2 py-1 border-b border-slate-700">
+                  <span class="badge badge-blue">${e.type}</span>
+                  <span>${e.name}</span>
+                  <span class="text-xs text-slate-500 ml-auto">${e.count || 1}x</span>
+                </div>`
+              ).join('')}
+            </div>
+          </div>
+          <div class="card">
+            <h3 class="font-semibold mb-2">Relations (${relations.length})</h3>
+            <div style="max-height: 400px; overflow-y: auto;">
+              ${relations.length === 0 ? '<p class="text-slate-500">No relations</p>' : relations.map(r =>
+                `<div class="py-1 border-b border-slate-700 text-sm">
+                  <span class="text-cyan-400">${r.source}</span>
+                  <span class="text-slate-500 mx-1">→ ${r.type} →</span>
+                  <span class="text-cyan-400">${r.target}</span>
+                </div>`
+              ).join('')}
+            </div>
+          </div>
+        </div>
+        <div class="text-xs text-slate-500 flex items-center gap-2">
+          <span class="inline-block w-2 h-2 rounded-full bg-green-500"></span>
+          Knowledge graph built locally from your documents
+        </div>
+      `;
+    }
 
     // ─── Modal ───────────────────────────────────────────────────
     function showModal(title, body, onSave) {
