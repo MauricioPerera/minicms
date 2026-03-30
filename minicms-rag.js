@@ -50,15 +50,22 @@ let _mammoth = null;
 
 async function loadTransformers() {
   if (_transformers) return _transformers;
-  _transformers = await import(/* webpackIgnore: true */ TRANSFORMERS_CDN);
-  _transformers.env.allowLocalModels = false;
+  // transformers.js v3 ESM from CDN
+  const mod = await import(/* webpackIgnore: true */ TRANSFORMERS_CDN);
+  // Handle both default export and named exports
+  _transformers = mod.default ? { ...mod.default, ...mod } : mod;
+  if (_transformers.env) _transformers.env.allowLocalModels = false;
   return _transformers;
 }
 
 async function loadPdfJs() {
   if (_pdfjsLib) return _pdfjsLib;
-  _pdfjsLib = await import(/* webpackIgnore: true */ PDFJS_CDN);
-  _pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN;
+  const mod = await import(/* webpackIgnore: true */ PDFJS_CDN);
+  _pdfjsLib = mod.default || mod;
+  // Worker must be set before any getDocument call
+  if (_pdfjsLib.GlobalWorkerOptions) {
+    _pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_CDN;
+  }
   return _pdfjsLib;
 }
 
@@ -164,9 +171,10 @@ export default class MiniRAG {
     /** @type {string|null} */
     this._errorMessage = null;
 
-    // Pipeline references (set during init)
-    this._embedder = null;
-    this._generator = null;
+    // Pipeline/model references (set during init)
+    this._embedder = null;   // feature-extraction pipeline
+    this._tokenizer = null;  // AutoTokenizer for Qwen3
+    this._model = null;      // AutoModelForCausalLM for Qwen3
   }
 
   // -----------------------------------------------------------------------
@@ -209,7 +217,7 @@ export default class MiniRAG {
       report('Loading transformers.js runtime...');
       const tf = await loadTransformers();
 
-      // 2. Embedding pipeline
+      // 2. Embedding pipeline (feature-extraction works with pipeline API)
       report('Downloading embedding model (multilingual-e5-small)...');
       this._embedder = await tf.pipeline('feature-extraction', EMBED_MODEL, {
         progress_callback: (p) => {
@@ -219,7 +227,7 @@ export default class MiniRAG {
         },
       });
 
-      // 3. LLM pipeline -- prefer WebGPU, fall back to WASM
+      // 3. LLM — use AutoTokenizer + AutoModelForCausalLM (not pipeline)
       report('Downloading LLM (Qwen3-0.6B)...');
       let device = 'webgpu';
       try {
@@ -228,17 +236,22 @@ export default class MiniRAG {
         if (!adapter) throw new Error('No WebGPU adapter');
       } catch {
         device = 'wasm';
-        report('WebGPU not available, falling back to WASM...');
+        report('WebGPU not available, falling back to WASM (slower)...');
       }
 
-      this._generator = await tf.pipeline('text-generation', LLM_MODEL, {
+      const progressCb = (p) => {
+        if (p && p.status === 'progress') {
+          report(`LLM: ${p.file}`, p.loaded, p.total);
+        }
+      };
+
+      this._tokenizer = await tf.AutoTokenizer.from_pretrained(LLM_MODEL, {
+        progress_callback: progressCb,
+      });
+      this._model = await tf.AutoModelForCausalLM.from_pretrained(LLM_MODEL, {
+        dtype: 'q4f16',
         device,
-        dtype: device === 'webgpu' ? 'fp16' : 'q4',
-        progress_callback: (p) => {
-          if (p && p.status === 'progress') {
-            report(`LLM model: ${p.file}`, p.loaded, p.total);
-          }
-        },
+        progress_callback: progressCb,
       });
 
       // 4. Ensure internal collections
@@ -460,7 +473,11 @@ export default class MiniRAG {
       pooling: 'mean',
       normalize: true,
     });
-    return new Float32Array(result.data);
+    // transformers.js v3 returns Tensor — extract data correctly
+    if (result.data) return new Float32Array(result.data);
+    if (result.tolist) return new Float32Array(result.tolist().flat());
+    if (Array.isArray(result)) return new Float32Array(result.flat());
+    return new Float32Array(result);
   }
 
   /**
@@ -562,21 +579,35 @@ export default class MiniRAG {
   async _generate(prompt, maxTokens = DEFAULT_MAX_TOKENS) {
     this._assertReady();
 
+    // Build chat messages
     const messages = typeof prompt === 'string'
       ? [{ role: 'user', content: prompt }]
       : prompt;
 
-    const output = await this._generator(messages, {
+    // Apply chat template to get input_ids
+    const inputText = this._tokenizer.apply_chat_template(messages, {
+      add_generation_prompt: true,
+      tokenize: false,
+    });
+    const inputs = this._tokenizer(inputText, { return_tensors: 'pt' });
+
+    // Generate
+    const output = await this._model.generate({
+      ...inputs,
       max_new_tokens: maxTokens,
       temperature: 0.3,
       do_sample: true,
-      return_full_text: false,
+      top_k: 20,
     });
 
-    const raw = output[0]?.generated_text;
-    if (typeof raw === 'string') return raw.trim();
-    if (Array.isArray(raw)) return raw.map(m => m.content).join('').trim();
-    return String(raw || '').trim();
+    // Decode only the new tokens (skip input tokens)
+    const inputLen = inputs.input_ids.dims?.[1] || inputs.input_ids.size;
+    const newTokens = output.slice(null, [inputLen, null]);
+    const decoded = this._tokenizer.decode(newTokens.data || newTokens[0], {
+      skip_special_tokens: true,
+    });
+
+    return decoded.trim();
   }
 
   // -----------------------------------------------------------------------
@@ -804,7 +835,7 @@ export default class MiniRAG {
     let sources = vectorResults.map(r => ({
       text: r.record.text,
       page: r.record.page || 1,
-      score: 1 - (r.distance || 0), // cosine distance to similarity
+      score: Math.max(0, 1 - (r.distance || 0)), // cosine distance [0,2] → similarity [0,1]
       doc: r.record.source_name || r.record.source_doc,
       _entityIds: r.record.entity_ids || [],
     }));
@@ -901,7 +932,9 @@ export default class MiniRAG {
       .slice(0, topK + 3) // allow a few extra from graph
       .map((s, i) => `[Source ${i + 1}, Page ${s.page}, ${s.doc}]\n${s.text}`);
 
-    const contextStr = contextParts.join('\n\n') + graphContext;
+    let contextStr = contextParts.join('\n\n') + graphContext;
+    // Truncate context to ~3000 chars (~750 tokens) to stay within model limits
+    if (contextStr.length > 3000) contextStr = contextStr.slice(0, 3000) + '\n[...truncated]';
 
     // 5. Generate answer
     const messages = [
@@ -1077,14 +1110,14 @@ export default class MiniRAG {
       } catch { /* best effort */ }
     }
 
-    // 4. Remove document record (find by matching name or other means)
-    // Since we don't have the _rag_documents _id, search by content
+    // 4. Remove document record by matching doc_id field
     try {
-      const docs = this._cms.list('_rag_documents', { limit: 500 });
+      const docs = this._cms.list('_rag_documents', {
+        filter: { doc_id: docId },
+        limit: 10,
+      });
       for (const doc of docs.items) {
-        // Match by ingested_at proximity or name -- best effort
-        // In practice the caller should also track the _rag_documents _id
-        // For now we leave document records as-is; they serve as history
+        this._cms.delete('_rag_documents', doc._id);
       }
     } catch { /* best effort */ }
 
