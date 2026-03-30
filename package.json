@@ -1,12 +1,20 @@
 {
   "name": "minicms",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
-  "description": "PocketBase-like CMS powered by minimemory WASM — runs in browser or as Node.js server",
+  "description": "PocketBase-like CMS with GraphRAG and MCP server — powered by minimemory WASM",
   "main": "minicms.js",
+  "bin": {
+    "minicms-mcp": "minicms-mcp.js",
+    "minicms-server": "minicms-server.js"
+  },
   "scripts": {
     "start": "node minicms-server.js",
-    "dev": "node minicms-server.js 3000 ./data"
+    "dev": "node minicms-server.js 3000 ./data",
+    "mcp": "node minicms-mcp.js"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  }
 }
