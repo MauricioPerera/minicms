@@ -465,7 +465,7 @@ class MiniCMS {
       _collection: collection,
       _created: timestamp,
       _updated: timestamp,
-      _deleted: false
+      _deleted: { $ne: true }
     };
     // Extract vector field (first vector-type field in schema)
     const vectorField = schema.fields.find(f => f.type === 'vector');
@@ -473,15 +473,19 @@ class MiniCMS {
     if (vectorField && record[vectorField.name]) {
       vector = Array.from(record[vectorField.name]);
       // Pad or truncate to DB dimensions
-      if (vector.length < this._dims) vector = vector.concat(new Array(this._dims - vector.length).fill(0));
+      if (vector.length < this._dims) vector = vector.concat(Array.from({ length: this._dims - vector.length }, () => 0));
       if (vector.length > this._dims) vector = vector.slice(0, this._dims);
     }
 
-    this._db.insert_document(
-      this._docId(collection, id),
-      vector,
-      JSON.stringify(record),
-    );
+    try {
+      this._db.insert_document(
+        this._docId(collection, id),
+        vector,
+        JSON.stringify(record),
+      );
+    } catch (e) {
+      throw new Error(`Failed to insert record: ${e.message}`);
+    }
     this._emit(collection, 'create', record);
     this._scheduleSave();
     return record;
@@ -492,10 +496,16 @@ class MiniCMS {
     const docId = this._docId(collection, id);
     const raw = this._db.get(docId);
     if (!raw) return null;
-    const doc = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    const meta = doc.metadata || doc;
-    if (meta._deleted) return null;
-    return meta;
+    try {
+      const doc = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const meta = doc.metadata
+        ? (typeof doc.metadata === 'string' ? JSON.parse(doc.metadata) : doc.metadata)
+        : doc;
+      if (meta._deleted === true) return null;
+      return meta;
+    } catch {
+      return null;
+    }
   }
 
   update(collection, id, data) {
@@ -514,14 +524,18 @@ class MiniCMS {
     let vector = null;
     if (vectorField && updated[vectorField.name]) {
       vector = Array.from(updated[vectorField.name]);
-      if (vector.length < this._dims) vector = vector.concat(new Array(this._dims - vector.length).fill(0));
+      if (vector.length < this._dims) vector = vector.concat(Array.from({ length: this._dims - vector.length }, () => 0));
       if (vector.length > this._dims) vector = vector.slice(0, this._dims);
     }
 
     // Delete old and re-insert (minimemory has no partial update for metadata)
     const docId = this._docId(collection, id);
-    this._db.delete(docId);
-    this._db.insert_document(docId, vector, JSON.stringify(updated));
+    try {
+      this._db.delete(docId);
+      this._db.insert_document(docId, vector, JSON.stringify(updated));
+    } catch (e) {
+      throw new Error(`Failed to update record: ${e.message}`);
+    }
     this._emit(collection, 'update', updated);
     this._scheduleSave();
     return updated;
@@ -537,8 +551,12 @@ class MiniCMS {
       _updated: now()
     };
     const docId = this._docId(collection, id);
-    this._db.delete(docId);
-    this._db.insert_document(docId, null, JSON.stringify(updated));
+    try {
+      this._db.delete(docId);
+      this._db.insert_document(docId, null, JSON.stringify(updated));
+    } catch (e) {
+      throw new Error(`Failed to delete record: ${e.message}`);
+    }
     this._emit(collection, 'delete', updated);
     this._scheduleSave();
     return updated;
@@ -546,7 +564,7 @@ class MiniCMS {
 
   list(collection, { filter, orderBy, desc, limit, offset } = {}) {
     this._assertCollection(collection);
-    const f = { _collection: collection, _deleted: false, ...(filter || {}) };
+    const f = { _collection: collection, _deleted: { $ne: true }, ...(filter || {}) };
     const raw = this._db.list_documents(
       JSON.stringify(f),
       orderBy || '_created',
@@ -636,7 +654,7 @@ class MiniCMS {
     try {
       const existing = JSON.parse(
         this._db.list_documents(
-          JSON.stringify({ _collection: '_users', email, _deleted: false }),
+          JSON.stringify({ _collection: '_users', email, _deleted: { $ne: true } }),
           '', false, 1, 0
         )
       );
@@ -654,7 +672,7 @@ class MiniCMS {
       _collection: '_users',
       _created: timestamp,
       _updated: timestamp,
-      _deleted: false,
+      _deleted: { $ne: true },
       email,
       password: hashedPw,
       role
@@ -674,7 +692,7 @@ class MiniCMS {
     try {
       const res = JSON.parse(
         this._db.list_documents(
-          JSON.stringify({ _collection: '_users', email, _deleted: false }),
+          JSON.stringify({ _collection: '_users', email, _deleted: { $ne: true } }),
           '', false, 1, 0
         )
       );

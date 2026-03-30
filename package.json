@@ -1,0 +1,12 @@
+{
+  "name": "minicms",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "PocketBase-like CMS powered by minimemory WASM — runs in browser or as Node.js server",
+  "main": "minicms.js",
+  "scripts": {
+    "start": "node minicms-server.js",
+    "dev": "node minicms-server.js 3000 ./data"
+  },
+  "license": "MIT"
+}
